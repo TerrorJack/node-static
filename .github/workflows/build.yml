@@ -7,9 +7,16 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    name: build
+  linux:
+    name: ${{ matrix.sys }}
     runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            sys: x86_64-linux
+          - arch: arm64/v8
+            sys: aarch64-linux
     steps:
 
       - name: setup-podman
@@ -20,6 +27,7 @@ jobs:
           pushd "$(mktemp -d)"
           curl -f -L --retry 5 https://github.com/tweag/rust-alpine-mimalloc/archive/refs/heads/master.tar.gz | tar xz --strip-components=1
           podman build \
+            --arch ${{ matrix.arch }} \
             --network host \
             --pull \
             --squash-all \
@@ -33,6 +41,7 @@ jobs:
       - name: build-node
         run: |
           podman run \
+            --arch ${{ matrix.arch }} \
             --init \
             --network host \
             --rm \
@@ -42,14 +51,63 @@ jobs:
             rust:alpine-mimalloc \
             /workspace/build.sh
 
+      - name: upload-artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-linux-${{ matrix.sys }}-static
+          path: node-v*-linux-*-static.tar.xz
+
       - name: test-node
+        if: matrix.arch == 'amd64'
         run: |
           tar xJf node-v*-linux-x64-static.tar.xz
           export PATH=$PWD/node-v*-linux-x64-static/bin:$PATH
           npm install @bjorn3/browser_wasi_shim
 
+  darwin:
+    name: ${{ matrix.arch }}-darwin
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - arch: aarch64
+            os: macos-15
+          - arch: x86_64
+            os: macos-15-large
+    steps:
+
+      - name: setup-xcode
+        run: |
+          sudo xcode-select --switch /Applications/Xcode_16.1.app
+
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: build-node
+        run: |
+          set -euo pipefail
+
+          node_ver=v22.9.0
+
+          pushd "$(mktemp -d)"
+
+          curl -f -L --retry 5 https://github.com/nodejs/node/archive/refs/tags/$node_ver.tar.gz | tar xz --strip-components=1
+          patch -p1 -i $GITHUB_WORKSPACE/bump-v8-wasm-limits.diff
+
+          make -j$(curl -f -L --retry 5 https://gitlab.haskell.org/ghc/ghc/-/raw/master/mk/detect-cpu-count.sh | sh) binary
+
+          mv node-$node_ver-*.tar.xz $GITHUB_WORKSPACE
+
+          popd
+
       - name: upload-artifact
         uses: actions/upload-artifact@v4
         with:
-          name: node-linux-x64-static
-          path: node-v*-linux-x64-static.tar.xz
+          name: node-darwin-${{ matrix.arch }}
+          path: node-v*.tar.xz
+
+      - name: test-node
+        run: |
+          tar xJf node-v*.tar.xz
+          export PATH=$PWD/node-v*/bin:$PATH
+          npm install @bjorn3/browser_wasi_shim
